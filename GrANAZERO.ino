@@ -1,43 +1,63 @@
+
 #include <TFT_eSPI.h>  // Biblioteca para a tela TFT
 #include <SPI.h>
 #include <WiFi.h>      // Biblioteca para o WiFi
-#include "BLEDevice.h" // Biblioteca para o BLE
 #include "esp_wifi.h"  // Biblioteca para o modo promíscuo do Wi-Fi
 #include "esp_wifi_types.h"  // Inclui as definições de tipos necessárias
+
+
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+
+
+struct PacketInfo {
+  wifi_promiscuous_pkt_t packet;
+  wifi_promiscuous_pkt_type_t type;
+};
+
 
 // Declaração da instância da classe TFT_eSPI
 TFT_eSPI tft = TFT_eSPI(); 
 
-#define BUTTON_W 150
-#define BUTTON_H 40
-#define BUTTON_X 330
-#define BUTTON_Y_START 20
-#define BUTTON_GAP 60
+#define BUTTON_W 190
+#define BUTTON_H 50
+#define BUTTON_X_LEFT 50
+#define BUTTON_X_RIGHT 230
+#define BUTTON_Y_START 60
+#define BUTTON_GAP 80
 
 uint16_t touchX, touchY;
 bool exitFlag = false; // Flag para sinalizar a saída
 
+
+int scanTime = 5; // Duration of the scan in seconds
+BLEScan* pBLEScan;
+
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
-    void onResult(BLEAdvertisedDevice advertisedDevice) {
-        tft.setCursor(0, tft.getCursorY());
-         std::string name = advertisedDevice.getName().c_str();  
+    void onResult(BLEAdvertisedDevice advertisedDevice) override {
+       // Serial.printf("Advertised Device: %s \n", advertisedDevice.toString().c_str());
+        std::string name = advertisedDevice.getName().c_str();
+        if (name.empty()) {
+            name = "<Unnamed>";  // Placeholder for unnamed devices
+        }
         int rssi = advertisedDevice.getRSSI();
-        
-        // Destacar se for um AirTag da Apple
+        std::string address = advertisedDevice.getAddress().toString().c_str();
+
+        // Highlight Apple AirTags in red
         if (name.find("AirTag") != std::string::npos) {
             tft.setTextColor(TFT_RED, TFT_BLACK);
         } else {
             tft.setTextColor(TFT_WHITE, TFT_BLACK);
         }
 
-        tft.printf("Device: %s, RSSI: %d\n", name.c_str(), rssi);
+        // Print device information
+        //tft.printf("Device: %s, RSSI: %d, Address: %s\n", name.c_str(), rssi, address.c_str());
     }
 };
 
-BLEScan* pBLEScan;
-wifi_promiscuous_filter_t snifferFilter = {
-  .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA
-};
+
 
 // Definições das estruturas
 typedef struct {
@@ -61,12 +81,12 @@ struct Button {
 };
 
 Button buttons[] = {
-  {BUTTON_X, BUTTON_Y_START, BUTTON_W, BUTTON_H, "WiFi Scan"},
-  {BUTTON_X, BUTTON_Y_START + BUTTON_GAP, BUTTON_W, BUTTON_H, "WiFi Sniffer"},
-  {BUTTON_X, BUTTON_Y_START + 2 * BUTTON_GAP, BUTTON_W, BUTTON_H, "BLE Sniffer"},
-  {BUTTON_X, BUTTON_Y_START + 3 * BUTTON_GAP, BUTTON_W, BUTTON_H, "BLE Scan"},
-  {BUTTON_X, BUTTON_Y_START + 4 * BUTTON_GAP, BUTTON_W, BUTTON_H, "WiFi Jammer"},
-  {BUTTON_X, BUTTON_Y_START + 5 * BUTTON_GAP, BUTTON_W, BUTTON_H, "Bluetooth Jammer"}
+  {BUTTON_X_LEFT, BUTTON_Y_START, BUTTON_W, BUTTON_H, "WiFi Scan"},
+  {BUTTON_X_LEFT, BUTTON_Y_START + BUTTON_GAP, BUTTON_W, BUTTON_H, "WiFi Sniffer"},
+  {BUTTON_X_LEFT, BUTTON_Y_START + 2 * BUTTON_GAP, BUTTON_W, BUTTON_H, "WiFi Jammer"},
+  {BUTTON_X_RIGHT, BUTTON_Y_START, BUTTON_W, BUTTON_H, "BLE Scan"},
+  {BUTTON_X_RIGHT, BUTTON_Y_START + BUTTON_GAP, BUTTON_W, BUTTON_H, "BLE Sniffer"},
+  {BUTTON_X_RIGHT, BUTTON_Y_START + 2 * BUTTON_GAP, BUTTON_W, BUTTON_H, "BLE Jammer"}
 };
 
 void setup() {
@@ -89,6 +109,9 @@ void loop() {
   if (tft.getTouch(&touchX, &touchY)) {
     handleTouch((int)touchX, (int)touchY); // Converte touchX e touchY para int
   }
+
+      loopSPIFF();
+
 }
 
 void drawUI() {
@@ -152,13 +175,13 @@ void executeButtonAction(int buttonIndex) {
       WiFiSniffer();
       break;
     case 2:
-      BLESniffer();
+      wifiJammer();
       break;
     case 3:
       scanBluetooth();
       break;
     case 4:
-      wifiJammer();
+      BLESniffer();
       break;
     case 5:
       bluetoothJammer();
@@ -226,49 +249,55 @@ float calculateDistance(int32_t rssi) {
     return (0.89976) * pow(ratio, 7.7095) + 0.111;
   }
 }
-
 void scanBluetooth() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextSize(1);
   tft.setCursor(0, 0);
-
+  
+  // Initialize BLE scan
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setActiveScan(true);
-  pBLEScan->start(10, false);
+  pBLEScan->setInterval(40);  // Increase interval to capture scan response packets
+  pBLEScan->setWindow(40);    // Increase window to capture scan response packets
+  pBLEScan->start(scanTime, false);
+  
+  while (!exitFlag) {
+    BLEScanResults foundDevices = *pBLEScan->start(scanTime, false);
+    tft.fillScreen(TFT_BLACK);  // Clear the screen before displaying new results
+    
+    for (int i = 0; i < foundDevices.getCount(); i++) {
+      BLEAdvertisedDevice device = foundDevices.getDevice(i);
+      std::string name = device.getName().c_str();
+      if (name.empty()) {
+        name = "<Unnamed>";  // Placeholder for unnamed devices
+      }
+      int rssi = device.getRSSI();
+      float distance = calculateDistance(rssi);
+      std::string address = device.getAddress().toString().c_str();
 
-  BLEScanResults results = *pBLEScan->getResults();
-  for (int i = 0; i < results.getCount(); i++) {
-    BLEAdvertisedDevice device = results.getDevice(i);
-    std::string name = device.getName().c_str();
-    int rssi = device.getRSSI();
-    float distance = calculateDistance(rssi);
+      tft.setCursor(0, i * 20);
+      tft.printf("%d: %s", i + 1, name.c_str());
 
-    // Atualiza a linha correspondente com informações do dispositivo BLE
-    tft.fillRect(0, i * 20, 480, 20, TFT_BLACK); // Limpa a linha
-    tft.setCursor(0, i * 20);
-    tft.printf("%d: %s ", i + 1, name.c_str());
+      int barLength = map(rssi, -100, -30, 0, 100);
+      tft.fillRect(150, i * 20, barLength, 10, TFT_GREEN);
 
-    // Desenha a barra de nível de sinal
-    int barLength = map(rssi, -100, -30, 0, 100);
-    tft.fillRect(150, i * 20, barLength, 10, TFT_GREEN);
+      tft.setCursor(260, i * 20);
+      tft.printf("(%d dBm, %.1f m, %s)", rssi, distance, address.c_str());
+    }
 
-    // Mostra o nível de sinal e a distância
-    tft.setCursor(260, i * 20);
-    tft.printf("(%d dBm, ", rssi);
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.printf("%.1f m", distance);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.printf(")");
-  }
-
-  // Verifica se a flag de saída foi setada
-  if (tft.getTouch(&touchX, &touchY)) {
-    exitFlag = true;
-    drawUI();
+    if (tft.getTouch(&touchX, &touchY)) {
+      exitFlag = true;
+      drawUI();
+      break;
+    }
+    delay(2000);  // Wait for 2 seconds before starting the next scan
   }
 }
+
+
+
 
 void BLESniffer() {
   tft.fillScreen(TFT_BLACK);
@@ -299,53 +328,6 @@ void BLESniffer() {
     }
     delay(100);
   }
-}
-
-void WiFiSniffer() {
-  tft.fillScreen(TFT_BLACK);
-  tft.setCursor(0, 0);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(1);
-
-  tft.println("WiFi Sniffer...");
-
-  WiFi.disconnect();
-  WiFi.mode(WIFI_MODE_STA);
-  WiFi.mode(WIFI_STA);
-  esp_wifi_set_promiscuous(true);
-  esp_wifi_set_promiscuous_filter(&snifferFilter);
-  esp_wifi_set_promiscuous_rx_cb(wifiSnifferPacketHandler);
-
-  while (!exitFlag) {
-    // Verifica se a flag de saída foi setada
-    if (tft.getTouch(&touchX, &touchY)) {
-      exitFlag = true;
-      esp_wifi_set_promiscuous(false);
-      drawUI();
-      break;
-    }
-    delay(100);
-  }
-}
-
-void wifiSnifferPacketHandler(void* buf, wifi_promiscuous_pkt_type_t type) {
-  wifi_promiscuous_pkt_t *p = (wifi_promiscuous_pkt_t *)buf;
-  const wifi_ieee80211_packet_t *ipkt = (wifi_ieee80211_packet_t *)p->payload;
-  const wifi_ieee80211_mac_hdr_t *hdr = (wifi_ieee80211_mac_hdr_t *) &ipkt->payload[0];
-
-  tft.setCursor(0, tft.getCursorY());
-  
-  // Verifica se o pacote é criptografado
-  bool isEncrypted = (hdr->frame_ctrl & 0x0040);
-  if (isEncrypted) {
-    tft.setTextColor(TFT_RED, TFT_BLACK); // Cor para pacotes criptografados
-  } else {
-    tft.setTextColor(TFT_GREEN, TFT_BLACK); // Cor para pacotes não criptografados
-  }
-
-  tft.printf("Packet: %02x:%02x:%02x:%02x:%02x:%02x\n", 
-             hdr->addr2[0], hdr->addr2[1], hdr->addr2[2], 
-             hdr->addr2[3], hdr->addr2[4], hdr->addr2[5]);
 }
 
 void wifiJammer() {
@@ -414,6 +396,7 @@ void bluetoothJammer() {
 
     if (tft.getTouch(&touchX, &touchY)) {
       exitFlag = true;
+      
       drawUI();
       break;
     }
